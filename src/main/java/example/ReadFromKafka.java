@@ -12,7 +12,9 @@ import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer;
 import org.apache.flink.streaming.util.serialization.JSONKeyValueDeserializationSchema;
@@ -20,6 +22,7 @@ import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Properties;
@@ -63,7 +66,22 @@ public class ReadFromKafka {
                         s.get("value").get(TXN_AMT).asDouble(),
                         s.get("value").get(TIMESTAMP).asLong()));
             }
-        });
+        }).assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks<Tuple3<String, Double, Long>>() {
+                    private long MAX_TIMESTAMP;
+                    @Nullable
+                    @Override
+                    public Watermark getCurrentWatermark() {
+                        Watermark watermark = new Watermark(MAX_TIMESTAMP);
+                        return watermark;
+                    }
+
+                    @Override
+                    public long extractTimestamp(Tuple3<String, Double, Long> currentElement, long l) {
+                        long currentWatermark = currentElement.f2;
+                        MAX_TIMESTAMP = Math.max(currentWatermark, MAX_TIMESTAMP);
+                        return currentElement.f2;
+                    }
+        }).rebalance();
 
         //// PRODUCT KAFKA
         FlinkKafkaProducer<String> myProducer = new FlinkKafkaProducer(KAFKA_PRODUCER_TOPIC, new ProducerStringSerializationSchema(KAFKA_PRODUCER_TOPIC), properties, FlinkKafkaProducer.Semantic.EXACTLY_ONCE);
@@ -76,12 +94,12 @@ public class ReadFromKafka {
                                 input.f0, input.f1, input.f2, context.timestamp()));
                     }
                 })
-                .filter(new FilterFunction<Tuple4<String, Double, Long, Long>>() {
-                    @Override
-                    public boolean filter(Tuple4<String, Double, Long, Long> transactionData) throws Exception {
-                        return (transactionData.f2 > (transactionData.f3-60000));
-                    }
-                })
+//                .filter(new FilterFunction<Tuple4<String, Double, Long, Long>>() {
+//                    @Override
+//                    public boolean filter(Tuple4<String, Double, Long, Long> transactionData) throws Exception {
+//                        return (transactionData.f2 > (transactionData.f3-60000));
+//                    }
+//                })
                 .keyBy(0).process(new CountWithTimeoutFunction())
                 // Filter total_amount > 1,000,000 and count > 10
                 .filter(new FilterFunction<Tuple4<String, Double, Long, String>>() {
